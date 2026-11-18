@@ -1,104 +1,53 @@
-//////////////////////////
-// Proxy for AI service
-//////////////////////////
-
-use std::collections::HashMap;
-use std::fmt;
-use actix_web::{web, Error, HttpResponse, ResponseError};
 use crate::startup::AppState;
-use futures_util::StreamExt;
+use actix_web::{error, http::StatusCode, web, Error, HttpResponse};
+use reqwest::Client;
+use std::time::Duration;
 
-#[derive(Debug)]
-pub struct ProxyError(reqwest::Error);
-
-impl fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl ResponseError for ProxyError {
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::InternalServerError().json(self.0.to_string())
-    }
-}
-
-impl From<reqwest::Error> for ProxyError {
-    fn from(err: reqwest::Error) -> ProxyError {
-        ProxyError(err)
-    }
+async fn forward(request: reqwest::RequestBuilder) -> Result<HttpResponse, Error> {
+    let response = request
+        .timeout(Duration::from_secs(165))
+        .send()
+        .await
+        .map_err(|_| error::ErrorBadGateway("Could not reach the AI service"))?;
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).map_err(error::ErrorBadGateway)?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| error::ErrorBadGateway("Could not read the AI service response"))?;
+    Ok(HttpResponse::build(status)
+        .content_type("application/json")
+        .body(body))
 }
 
 pub async fn ai_health(data: web::Data<AppState>) -> Result<HttpResponse, Error> {
-    let client = reqwest::Client::new();
-    let ai_service_url = data.settings.ai_service_url.to_owned();
-    let resp = match client.get(ai_service_url + "/health").send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return Ok(HttpResponse::InternalServerError().json(e.to_string()))
-        }
-    };
-    let status = resp.status();
-    if status.is_success() {
-        let body_text = resp.text().await.map_err(ProxyError::from)?;
-        Ok(HttpResponse::Ok().body(body_text))
-    } else {
-        Ok(HttpResponse::build(actix_web::http::StatusCode::NOT_FOUND).body(""))
-    }
+    forward(Client::new().get(format!("{}/health", data.settings.ai_service_url))).await
 }
 
-pub async fn ai_generate_description(data: web::Data<AppState>, mut payload: web::Payload) -> Result<HttpResponse, Error> {
-    let mut body = web::BytesMut::new();
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk?;
-        body.extend_from_slice(&chunk);
-    }
-    let client = reqwest::Client::new();
-    let ai_service_url = data.settings.ai_service_url.to_owned();
-    let resp = match client.post( ai_service_url + "/generate/description")
-    .body(body.to_vec())
-    .send()
-    .await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return Ok(HttpResponse::InternalServerError().json(e.to_string()))
-        }
-    };
-
-    let status = resp.status();
-    let body: HashMap<String, String> = resp.json().await.map_err(ProxyError::from)?;
-    let body_json = serde_json::to_string(&body).unwrap();
-    if status.is_success() {
-        Ok(HttpResponse::Ok().body(body_json))
-    } else {
-        Ok(HttpResponse::build(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR).body(body_json))
-    }
+pub async fn ai_generate_description(
+    data: web::Data<AppState>,
+    body: web::Bytes,
+) -> Result<HttpResponse, Error> {
+    let url = format!("{}/generate/description", data.settings.ai_service_url);
+    forward(
+        Client::new()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body),
+    )
+    .await
 }
 
-pub async fn ai_generate_image(data: web::Data<AppState>, mut payload: web::Payload) -> Result<HttpResponse, Error> {
-    let mut body = web::BytesMut::new();
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk?;
-        body.extend_from_slice(&chunk);
-    }
-    let client = reqwest::Client::new();
-    let ai_service_url = data.settings.ai_service_url.to_owned();
-    let resp = match client.post( ai_service_url + "/generate/image")
-    .body(body.to_vec())
-    .send()
-    .await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return Ok(HttpResponse::InternalServerError().json(e.to_string()))
-        }
-    };
-
-    let status = resp.status();
-    let body: HashMap<String, String> = resp.json().await.map_err(ProxyError::from)?;
-    let body_json = serde_json::to_string(&body).unwrap();
-    if status.is_success() {
-        Ok(HttpResponse::Ok().body(body_json))
-    } else {
-        Ok(HttpResponse::build(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR).body(body_json))
-    }
+pub async fn ai_generate_image(
+    data: web::Data<AppState>,
+    body: web::Bytes,
+) -> Result<HttpResponse, Error> {
+    let url = format!("{}/generate/image", data.settings.ai_service_url);
+    forward(
+        Client::new()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body),
+    )
+    .await
 }
